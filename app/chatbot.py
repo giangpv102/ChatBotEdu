@@ -7,9 +7,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
 import os
+import re
 
-# --- CẤU HÌNH ĐƯỜNG DẪN TƯƠNG ĐỐI ---
-# Lấy thư mục gốc của dự án (thư mục chứa app, rag, finetune)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BASE_MODEL = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
@@ -17,7 +16,6 @@ ADAPTER_PATH = os.path.join(BASE_DIR, "finetune", "lora_model")
 DB_DIR = os.path.join(BASE_DIR, "rag", "db")
 EMBEDDING_MODEL = "BAAI/bge-m3"
 
-# --- 1. KHỞI TẠO RETRIEVER (RAG) ---
 print("Đang khởi tạo RAG Retriever...")
 try:
     embeddings = HuggingFaceEmbeddings(
@@ -32,7 +30,6 @@ except Exception as e:
     print(f"Lỗi khởi tạo RAG (Có thể chưa chạy ingest.py): {e}")
     rag_enabled = False
 
-# --- 2. KHỞI TẠO MÔ HÌNH LLM ---
 print("Đang tải LLM...")
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 model = AutoModelForCausalLM.from_pretrained(
@@ -62,8 +59,10 @@ def bot_stream(message, history):
     # Chuyển đổi history sang format của ChatML
     messages = [{"role": "system", "content": system_prompt}]
     for user_msg, assistant_msg in history:
+        # Loại bỏ khối <details> (suy luận) ra khỏi lịch sử để tiết kiệm token và tránh model bị "ảo giác"
+        clean_assistant_msg = re.sub(r"<details.*?</details>", "", assistant_msg, flags=re.DOTALL).strip()
         messages.append({"role": "user", "content": user_msg})
-        messages.append({"role": "assistant", "content": assistant_msg})
+        messages.append({"role": "assistant", "content": clean_assistant_msg})
     
     # Tin nhắn hiện tại của User (kèm context RAG)
     user_content = message
@@ -81,24 +80,43 @@ def bot_stream(message, history):
     inputs = tokenizer([text], return_tensors="pt").to(model.device)
     
     # 4. Cài đặt Streamer
-    streamer = TextIteratorStreamer(tokenizer, timeout=10.0, skip_prompt=True, skip_special_tokens=True)
+    streamer = TextIteratorStreamer(tokenizer, timeout=60.0, skip_prompt=True, skip_special_tokens=True)
     generation_kwargs = dict(
         inputs,
         streamer=streamer,
         max_new_tokens=2048,
+        do_sample=True,  # BẮT BUỘC có khi dùng temperature
         temperature=0.3, # Giữ thấp để tránh sinh ngẫu nhiên kiến thức
         top_p=0.9,
     )
     
-    # Bắt đầu thread sinh văn bản
-    thread = Thread(target=model.generate, kwargs=generation_kwargs)
+    # Bắt đầu thread sinh văn bản (Có try-except để bắt lỗi)
+    def generate_with_catch():
+        try:
+            model.generate(**generation_kwargs)
+        except Exception as e:
+            print(f"\n[LỖI GENERATE]: {e}")
+            
+    thread = Thread(target=generate_with_catch)
     thread.start()
     
     # 5. Yield kết quả ra Gradio
     partial_text = ""
     for new_text in streamer:
         partial_text += new_text
-        yield partial_text
+        
+        # Xử lý hiển thị thẻ <think> trên giao diện Gradio
+        display_text = partial_text
+        if "<think>" in display_text and "</think>" not in display_text:
+            # Đang trong quá trình suy nghĩ -> Mở block details
+            display_text = display_text.replace("<think>", "<details open>\n<summary>🧠 AI đang suy luận...</summary>\n\n")
+            display_text += "\n</details>" # Đóng tạm để Gradio không bị lỗi render HTML
+        else:
+            # Đã suy nghĩ xong -> Đóng block details lại cho gọn
+            display_text = display_text.replace("<think>", "<details>\n<summary>🧠 Quá trình suy luận của giáo viên AI</summary>\n\n")
+            display_text = display_text.replace("</think>", "\n</details>\n")
+            
+        yield display_text
 
 # --- 4. GIAO DIỆN GRADIO ---
 custom_css = """
