@@ -1,0 +1,22 @@
+# RAG requirements
+langchain
+langchain-community
+langchain-huggingface
+chromadb
+pypdf
+sentence-transformers
+
+# UI requirements
+gradio
+
+# Fine-tuning requirements (Unsloth & related)
+# Lưu ý: Khi train trên Colab, Unsloth nên được cài đặt theo lệnh chuẩn của họ:
+# !pip install unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+# !pip install --no-deps xformers "trl<0.9.0" peft accelerate bitsandbytes
+torch
+transformers
+datasets
+trl
+peft
+accelerate
+bitsandbytes
